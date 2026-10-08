@@ -32,13 +32,15 @@
       -SogliaSospettoMs 60    sospetto: ms massimi tra due pressioni
       -PausaNotificheSec 30   tempo minimo tra due notifiche (i doppi tap nel frattempo vengono sommati)
       -Autotest               verifica che tutto funzioni e termina (non scrive nei log)
+      -Demo                   mostra l'interfaccia con dati simulati (alcuni doppi tap e un sospetto); non scrive nei log
 #>
 param(
     [double]$SogliaMs = 35,
     [double]$SogliaRilascioMs = 10,
     [double]$SogliaSospettoMs = 60,
     [int]$PausaNotificheSec = 30,
-    [switch]$Autotest
+    [switch]$Autotest,
+    [switch]$Demo
 )
 
 $ErrorActionPreference = 'Stop'
@@ -301,7 +303,7 @@ namespace RilevatoreDoppioTap
                     else { st.DoppiTap++; _doppi++; }
                     ril = new Rilevamento();
                     ril.Sospetto = sospetto;
-                    ril.Ora = DateTime.Now;
+                    ril.Ora = DateTime.Now.AddMilliseconds(-Ms(Stopwatch.GetTimestamp() - ts));   // ora esatta dell'evento
                     ril.Tasto = tasto;
                     ril.Tastiera = tastiera;
                     ril.Tipo = tipo;
@@ -677,6 +679,7 @@ function Riga([string]$testo, [string]$colore = 'Gray') {
 }
 
 function Scrivi-Sessione([string]$testo) {
+    if ($Demo) { return }
     try { [IO.File]::AppendAllText($fileSessioni, ('{0:yyyy-MM-dd HH:mm:ss}  {1}' -f (Get-Date), $testo) + "`r`n", $utf8) } catch { }
 }
 
@@ -691,6 +694,7 @@ function Riga-Csv($r) {
 
 function Svuota-Log {
     if ($daScrivere.Count -eq 0) { return }
+    if ($Demo) { $daScrivere.Clear(); return }   # in demo non si scrive niente su disco
     $testo = (($daScrivere | ForEach-Object { Riga-Csv $_ }) -join "`r`n") + "`r`n"
     try {
         [IO.File]::AppendAllText($fileCsv, $testo, $utf8)
@@ -726,7 +730,7 @@ function Disegna {
     $righe = New-Object System.Collections.Generic.List[object]
 
     $durata = (Get-Date) - $s.Avvio
-    $righe.Add((Riga (' DOUBLE TAP DETECTOR    in ascolto da {0}:{1:00}:{2:00}    (avviato il {3:dd/MM} alle {3:HH:mm})' -f [int][Math]::Floor($durata.TotalHours), $durata.Minutes, $durata.Seconds, $s.Avvio) 'Cyan'))
+    $righe.Add((Riga ((' ' + $titolo.ToUpper()) + '    in ascolto da {0}:{1:00}:{2:00}    (avviato il {3:dd/MM} alle {3:HH:mm})' -f [int][Math]::Floor($durata.TotalHours), $durata.Minutes, $durata.Seconds, $s.Avvio) 'Cyan'))
     $righe.Add((Riga $sep 'DarkGray'))
     $righe.Add((Riga " Soglie:  DOPPIO TAP = ripremuto entro $testoSoglia ms dalla pressione o $testoSogliaR ms dal rilascio    SOSPETTO = entro $testoSogliaS ms"))
     $perc = ''
@@ -794,7 +798,8 @@ function Disegna {
 
     while ($righe.Count -lt $alt - 1 - $piede) { $righe.Add((Riga '')) }
     $righe.Add((Riga $sep 'DarkGray'))
-    $righe.Add((Riga " Log: $fileCsv" 'DarkGray'))
+    if ($Demo) { $righe.Add((Riga ' DEMO: dati simulati per mostrare l''interfaccia, niente viene salvato nei log' 'DarkYellow')) }
+    else { $righe.Add((Riga " Log: $fileCsv" 'DarkGray')) }
     $righe.Add((Riga ' [Q] esci   [H] riduci a icona   [L] apri log   [R] azzera statistiche   (ridotta a icona continua a controllare)' 'DarkCyan'))
 
     for ($i = 0; $i -lt $alt - 1; $i++) {
@@ -837,9 +842,9 @@ function Invoke-Autotest {
     Ev A giu 0; Ev A su 80; Ev A giu 200; Ev A su 260
     Verifica 'Digitazione normale (stesso tasto dopo 200 ms)' A 0 0 2
     Ev U1 giu 0; Ev U1 su 35; Ev U1 giu 70; Ev U1 su 105
-    Verifica 'Il tuo record con un dito (70 ms): nessun allarme' U1 0 0 2
+    Verifica 'Record misurato con un dito (70 ms): nessun allarme' U1 0 0 2
     Ev U2 giu 0; Ev U2 su 25; Ev U2 giu 43; Ev U2 su 70
-    Verifica 'Il tuo record con due dita (43 ms): solo sospetto' U2 0 1 2
+    Verifica 'Record misurato con due dita (43 ms): solo sospetto' U2 0 1 2
     Ev B giu 0; Ev B su 5; Ev B giu 12; Ev B su 60
     Verifica 'Rimbalzo in pressione (12 ms)' B 1 0 2
     Ev B2 giu 0; Ev B2 su 15; Ev B2 giu 30; Ev B2 su 80
@@ -902,6 +907,50 @@ function Invoke-Autotest {
     return $script:falliti
 }
 
+# Modalità demo: simula circa un minuto di scrittura normale con qualche difetto della tastiera,
+# passando gli eventi alla stessa logica di rilevamento usata con la tastiera vera.
+function Add-DatiDemo {
+    $freq = [Diagnostics.Stopwatch]::Frequency / 1000.0
+    $caso = New-Object System.Random 7
+    $eventi = New-Object System.Collections.Generic.List[object]
+    $t = 0.0
+
+    function Aggiungi([string]$tasto, [double]$giu, [double]$su) {
+        $eventi.Add(@($tasto, $false, $giu))
+        $eventi.Add(@($tasto, $true, $su))
+    }
+
+    $frase = 'la tastiera nuova scrive bene ma ogni tanto qualche lettera compare due volte senza motivo '
+    for ($giro = 0; $giro -lt 4; $giro++) {
+        $n = 0
+        foreach ($c in $frase.ToCharArray()) {
+            $tasto = if ($c -eq ' ') { 'Spazio' } else { ([string]$c).ToUpper() }
+            $durata = 60 + $caso.Next(35)
+            $n++
+            # difetti simulati (posizioni nella frase: 9 = 'e', 18 = spazio, 24 = 'e', 53 = 'l')
+            if ($giro -eq 1 -and $n -eq 9) {
+                Aggiungi 'E' $t ($t + 5); Aggiungi 'E' ($t + 13) ($t + $durata)              # doppia pressione dopo 13 ms
+            } elseif ($giro -eq 2 -and $n -eq 18) {
+                Aggiungi 'Spazio' $t ($t + $durata); Aggiungi 'Spazio' ($t + $durata + 6) ($t + $durata + 14)   # rimbalzo 6 ms dopo il rilascio
+            } elseif ($giro -eq 3 -and $n -eq 24) {
+                Aggiungi 'E' $t ($t + 8); Aggiungi 'E' ($t + 21) ($t + $durata)              # doppia pressione dopo 21 ms
+            } elseif ($giro -eq 3 -and $n -eq 53) {
+                Aggiungi 'L' $t ($t + 25); Aggiungi 'L' ($t + 47) ($t + $durata + 20)        # sospetto: 47 ms
+            } else {
+                Aggiungi $tasto $t ($t + $durata)
+            }
+            $t += 120 + $caso.Next(90)
+        }
+    }
+
+    # gli eventi vanno passati in ordine di tempo, come arriverebbero da Windows
+    $ordinati = $eventi | Sort-Object { $_[2] }
+    $base = [Diagnostics.Stopwatch]::GetTimestamp() - [long](($t + 2000) * $freq)
+    foreach ($e in $ordinati) {
+        $DTD::Elabora('demo/' + $e[0], $e[0], 'tastiera demo', $e[1], $base + [long]($e[2] * $freq), [int]$e[2])
+    }
+}
+
 # ==================================================================== avvio
 
 try {
@@ -923,7 +972,10 @@ $DTD = [RilevatoreDoppioTap.Rilevatore]
 if ($Autotest) { exit (Invoke-Autotest) }
 
 # Una sola istanza alla volta: se è già attivo, mostra la finestra esistente ed esci
-$mutex = New-Object System.Threading.Mutex($false, 'Local\DoubleTapDetector')
+# (la demo usa un nome diverso, così può girare anche mentre il rilevatore vero è attivo)
+$nomeMutex = if ($Demo) { 'Local\DoubleTapDetectorDemo' } else { 'Local\DoubleTapDetector' }
+$titolo = if ($Demo) { 'Double Tap Detector (demo)' } else { 'Double Tap Detector' }
+$mutex = New-Object System.Threading.Mutex($false, $nomeMutex)
 $haMutex = $false
 try { $haMutex = $mutex.WaitOne(0) }
 catch {
@@ -931,29 +983,35 @@ catch {
     else { throw }
 }
 if (-not $haMutex) {
-    Write-Host 'Double Tap Detector è già in esecuzione: lo trovi nella barra delle applicazioni.' -ForegroundColor Yellow
+    Write-Host "$titolo è già in esecuzione: lo trovi nella barra delle applicazioni." -ForegroundColor Yellow
     Get-Process powershell -ErrorAction SilentlyContinue |
-        Where-Object { $_.Id -ne $PID -and $_.MainWindowTitle -like 'Double Tap Detector*' } |
+        Where-Object { $_.Id -ne $PID -and $_.MainWindowTitle -like "$titolo*" } |
         ForEach-Object { $DTD::MostraFinestra($_.MainWindowHandle) }
     Start-Sleep -Seconds 4
     exit 0
 }
 
 try {
-    New-Item -ItemType Directory -Force -Path $cartellaLog | Out-Null
-    if (-not (Test-Path $fileCsv)) {
-        $intestazione = @('Data', 'Ora', 'Tasto', 'Tra le pressioni (ms)', 'Dal rilascio (ms)', 'Tipo', 'Tastiera') -join $sepCsv
-        [IO.File]::WriteAllText($fileCsv, $intestazione + "`r`n", $utf8)
+    if (-not $Demo) {
+        New-Item -ItemType Directory -Force -Path $cartellaLog | Out-Null
+        if (-not (Test-Path $fileCsv)) {
+            $intestazione = @('Data', 'Ora', 'Tasto', 'Tra le pressioni (ms)', 'Dal rilascio (ms)', 'Tipo', 'Tastiera') -join $sepCsv
+            [IO.File]::WriteAllText($fileCsv, $intestazione + "`r`n", $utf8)
+        }
+        [RilevatoreDoppioTap.Rilevatore]::FileSessioni = $fileSessioni
+        [RilevatoreDoppioTap.Rilevatore]::CartellaLog = $cartellaLog
     }
-    [RilevatoreDoppioTap.Rilevatore]::FileSessioni = $fileSessioni
-    [RilevatoreDoppioTap.Rilevatore]::CartellaLog = $cartellaLog
 
-    $Host.UI.RawUI.WindowTitle = 'Double Tap Detector'
+    $Host.UI.RawUI.WindowTitle = $titolo
     Prepara-Console
     $DTD::Avvia($true)
     $DTD::RegistraChiusuraFinestra()
-    Scrivi-Sessione "Avvio (doppio tap: $testoSoglia ms tra le pressioni o $testoSogliaR ms dal rilascio; sospetto: $testoSogliaS ms)"
-    $DTD::Notifica('Double Tap Detector attivo', "Ti avviso se un tasto viene registrato due volte (entro $testoSoglia ms, o $testoSogliaR ms dal rilascio). Clicca sull'icona per vedere i dati in tempo reale.", $false)
+    if ($Demo) {
+        Add-DatiDemo
+    } else {
+        Scrivi-Sessione "Avvio (doppio tap: $testoSoglia ms tra le pressioni o $testoSogliaR ms dal rilascio; sospetto: $testoSogliaS ms)"
+        $DTD::Notifica('Double Tap Detector attivo', "Ti avviso se un tasto viene registrato due volte (entro $testoSoglia ms, o $testoSogliaR ms dal rilascio). Clicca sull'icona per vedere i dati in tempo reale.", $false)
+    }
 } catch {
     Scrivi-Sessione "Errore all'avvio: $($_.Exception.Message)"
     [Console]::ResetColor()
@@ -1008,8 +1066,8 @@ try {
         if ($totale -ne $ultimoTotale) {
             $ultimoTotale = $totale
             if ($totale -eq 0) { $stato = 'nessun doppio tap' } elseif ($totale -eq 1) { $stato = '1 doppio tap' } else { $stato = "$totale doppi tap" }
-            $Host.UI.RawUI.WindowTitle = "Double Tap Detector - $stato"
-            $DTD::ImpostaTooltip("Double Tap Detector - $stato")
+            $Host.UI.RawUI.WindowTitle = "$titolo - $stato"
+            $DTD::ImpostaTooltip("$titolo - $stato")
         }
 
         try {
